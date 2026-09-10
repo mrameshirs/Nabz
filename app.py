@@ -103,7 +103,6 @@ def get_shared_state():
     d["face_photo"] = None
     d["patient_name"] = ""
     d["recording_start"] = None
-    d["scan_start_time"] = None  # wall-clock time.time() when this camera session began, for the countdown
     d["data_log"] = []
     # Debug counters — help diagnose whether recv() is actually running
     # and updating this exact shared state.
@@ -128,7 +127,6 @@ def reset_scan_state():
     app_state.ppg_signal = []
     app_state.face_photo = None
     app_state.recording_start = None
-    app_state.scan_start_time = None
     app_state.data_log = []
     app_state.debug_frame_count = 0
     app_state.debug_faces_detected_count = 0
@@ -154,10 +152,6 @@ class rPPGProcessor(VideoProcessorBase):
         self._local_frames_since_sync = 0
         self._local_faces_since_sync = 0
         self._local_last_status = "Awaiting Face..."
-        # Mark the start of this scan session for the on-screen countdown.
-        # A fresh rPPGProcessor is created each time the camera is started,
-        # so this correctly resets on every new scan.
-        app_state.scan_start_time = time.time()
 
     def recv(self, frame):
         img = frame.to_ndarray(format="rgb24")
@@ -276,18 +270,19 @@ class rPPGProcessor(VideoProcessorBase):
             app_state.sqi = min(100.0, (max_power / mean_power) * 15.0) if mean_power > 0 else 0
 
             # Peak detection for HRV. height=0 (any positive bump counts)
-            # is too lenient for a noisy webcam-derived signal — small
-            # ripples get counted as heartbeats. Requiring a minimum
-            # prominence relative to the signal's own amplitude filters
-            # out most of that noise.
-            peak_height_threshold = 0.3 * np.std(filtered_signal)
+            # was too lenient for a noisy webcam-derived signal, but the
+            # earlier 0.3*std threshold turned out too strict — it rejected
+            # nearly every window, leaving HRV/stress stuck at 0. 0.15*std
+            # is a better middle ground: still filters obvious noise
+            # ripples without discarding real, if slightly weak, beats.
+            peak_height_threshold = 0.15 * np.std(filtered_signal)
             peaks, _ = find_peaks(filtered_signal, distance=int(0.5 * actual_fs), height=peak_height_threshold)
 
-            # Require several beats before trusting an HRV estimate at all.
-            # With only 2-3 peaks, RMSSD is computed from just 1-2
-            # differences — statistically meaningless and highly sensitive
-            # to a single frame of timing jitter.
-            if len(peaks) >= 6:
+            # Require a handful of beats before trusting an HRV estimate —
+            # but not so many that a short recording window can never
+            # satisfy it. An 8-second window at 60-100 BPM yields roughly
+            # 8-13 beats, so 4 is a reasonable practical floor.
+            if len(peaks) >= 4:
                 # Sub-frame (parabolic) interpolation of each peak's true
                 # position, rather than snapping to the nearest whole frame.
                 # At typical webcam frame rates (~30fps), one frame is
@@ -314,7 +309,7 @@ class rPPGProcessor(VideoProcessorBase):
                 plausible_mask = (rr_intervals >= 333) & (rr_intervals <= 1500)
                 rr_intervals = rr_intervals[plausible_mask]
 
-                if len(rr_intervals) >= 5:
+                if len(rr_intervals) >= 3:
                     diff_rr = np.diff(rr_intervals)
                     new_hrv_estimate = np.sqrt(np.mean(diff_rr**2))
                     # Extra sanity clamp: even after interpolation and
@@ -598,6 +593,7 @@ with st.sidebar:
     st.markdown("---")
     if st.button("🔄 Start New Scan (Reset)", use_container_width=True):
         reset_scan_state()
+        st.session_state.scan_start_time = None
         st.rerun()
     st.caption("Clears BPM, HRV, respiration, stress, charts and the report — use this between patients or before rescanning, instead of rebooting the whole app.")
     st.markdown("---")
@@ -624,8 +620,16 @@ with col1:
     )
     if ctx.state.playing:
         st.success("✅ Camera Active - Recording Vitals")
+        # Track when this scan session actually started, for the countdown.
+        # This lives in plain session state (not the cross-process shared
+        # app_state) since it's a per-browser-session UI concern — simpler
+        # and more reliable than trying to time it from inside the video
+        # processor's constructor.
+        if st.session_state.get("scan_start_time") is None:
+            st.session_state.scan_start_time = time.time()
     else:
         st.warning("⚠️ Click START above to begin monitoring")
+        st.session_state.scan_start_time = None
 
 with col2:
     st.subheader("📊 Real-Time Dashboard")
@@ -635,7 +639,7 @@ with col2:
     # rerunning the whole page (which would otherwise restart/interrupt the
     # webrtc_streamer component and drop the active connection).
     @st.fragment(run_every=1)
-    def render_dashboard(playing: bool):
+    def render_dashboard(playing: bool, scan_start_time):
         has_data = len(app_state.data_log) > 0
 
         if not playing and not has_data:
@@ -646,7 +650,40 @@ with col2:
             st.info("⏹️ Recording stopped — showing your last results below.")
             if st.button("🔄 Start a New Scan", use_container_width=True, key="reset_from_dashboard"):
                 reset_scan_state()
+                st.session_state.scan_start_time = None
                 st.rerun()
+
+        SCAN_TARGET_SECONDS = 60
+
+        if playing and scan_start_time:
+            elapsed = time.time() - scan_start_time
+            remaining = max(0, SCAN_TARGET_SECONDS - elapsed)
+            progress_fraction = min(1.0, elapsed / SCAN_TARGET_SECONDS)
+
+            if remaining > 0:
+                countdown_color = "#EC4899" if remaining > 40 else "#F59E0B" if remaining > 15 else "#10B981"
+                st.markdown(f"""
+                <div style="background: linear-gradient(135deg, #1e293b, #0f172a); border-radius: 16px;
+                            padding: 16px; text-align: center; margin-bottom: 12px; border: 2px solid {countdown_color};">
+                    <div style="font-size: 0.85rem; color: #94a3b8; font-weight: 700; text-transform: uppercase; letter-spacing: 1px;">
+                        🧘 Stay Still — Scan In Progress
+                    </div>
+                    <div style="font-size: 2.8rem; font-weight: 900; color: {countdown_color}; margin: 4px 0;">
+                        {int(remaining)}s
+                    </div>
+                    <div style="font-size: 0.8rem; color: #64748b;">remaining for a complete, reliable reading</div>
+                </div>
+                """, unsafe_allow_html=True)
+                st.progress(progress_fraction)
+            else:
+                st.markdown("""
+                <div style="background: linear-gradient(135deg, #10B981, #059669); border-radius: 16px;
+                            padding: 16px; text-align: center; margin-bottom: 12px;">
+                    <div style="font-size: 1.3rem; font-weight: 900; color: white;">✅ 60-Second Scan Complete!</div>
+                    <div style="font-size: 0.85rem; color: white; opacity: 0.9;">You can stop now, or keep going for more data.</div>
+                </div>
+                """, unsafe_allow_html=True)
+                st.progress(1.0)
 
         col_a, col_b = st.columns(2)
         with col_a:
@@ -723,7 +760,7 @@ with col2:
         else:
             st.warning("Recording was too short to generate a full report (needs at least 15 seconds of data).")
 
-    render_dashboard(ctx.state.playing)
+    render_dashboard(ctx.state.playing, st.session_state.get("scan_start_time"))
 
 # -----------------------------------------------------------------------------
 # HOW IT WORKS — AI/ML PIPELINE EXPLAINER
