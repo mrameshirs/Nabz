@@ -4,6 +4,7 @@ av>=14.0.0,<17.0.0
 aiortc>=1.9.0
 opencv-python-headless==4.10.0.84
 numpy==1.26.4
+pandas==2.2.2
 scipy==1.13.1
 matplotlib==3.9.2
 Pillow==10.4.0
