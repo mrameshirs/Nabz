@@ -114,6 +114,24 @@ def get_shared_state():
 
 app_state = get_shared_state()
 
+def reset_scan_state():
+    """Clear all recorded vitals/results so a new scan starts fresh,
+    without needing to reboot the whole app. Patient name is intentionally
+    left as-is in case the same person is doing another scan."""
+    app_state.bpm = 0.0
+    app_state.hrv = 0.0
+    app_state.rr = 0.0
+    app_state.stress_index = 0.0
+    app_state.sqi = 0.0
+    app_state.status = "Awaiting Face..."
+    app_state.ppg_signal = []
+    app_state.face_photo = None
+    app_state.recording_start = None
+    app_state.data_log = []
+    app_state.debug_frame_count = 0
+    app_state.debug_faces_detected_count = 0
+    app_state.debug_last_update = None
+
 # -----------------------------------------------------------------------------
 # OPENCV HAAR CASCADE SETUP (Replaces MediaPipe)
 # -----------------------------------------------------------------------------
@@ -171,33 +189,44 @@ class rPPGProcessor(VideoProcessorBase):
         if len(faces) > 0:
             self._local_last_status = "✓ Signal Acquired"
             self._local_faces_since_sync += 1
-            for (x, y, w_face, h_face) in faces:
-                # Extract Forehead ROI (Top 35% of the face bounding box)
-                rx1 = int(x + w_face * 0.25)
-                rx2 = int(x + w_face * 0.75)
-                ry1 = int(y)
-                ry2 = int(y + h_face * 0.35)
 
-                if rx2 > rx1 and ry2 > ry1:
-                    roi_img = img[ry1:ry2, rx1:rx2]
-                    green_mean = np.mean(roi_img[:, :, 1])
-                    self.green_signal.append((green_mean, current_time))
+            # Haar cascades occasionally return more than one candidate box
+            # per frame (e.g. a real face plus a small false positive from a
+            # glasses reflection). Using an arbitrary one — especially for
+            # the captured patient photo — can grab a tiny, low-quality box
+            # that looks distorted once stretched to a fixed size in the PDF.
+            # Picking the single largest box by area reliably selects the
+            # real face and avoids polluting the pulse signal with a second,
+            # spurious ROI.
+            x, y, w_face, h_face = max(faces, key=lambda f: f[2] * f[3])
 
-                    # Capture face photo (first good frame)
-                    if app_state.face_photo is None:
-                        app_state.face_photo = img[y:y+h_face, x:x+w_face].copy()
+            # Extract Forehead ROI (Top 35% of the face bounding box)
+            rx1 = int(x + w_face * 0.25)
+            rx2 = int(x + w_face * 0.75)
+            ry1 = int(y)
+            ry2 = int(y + h_face * 0.35)
 
-                    # Maintain 15-second buffer
-                    if len(self.green_signal) > int(self.fps * 15):
-                        self.green_signal.pop(0)
+            if rx2 > rx1 and ry2 > ry1:
+                roi_img = img[ry1:ry2, rx1:rx2]
+                green_mean = np.mean(roi_img[:, :, 1])
+                self.green_signal.append((green_mean, current_time))
 
-                    # Calculate metrics every second
-                    if self.frame_count % max(1, int(self.fps)) == 0 and len(self.green_signal) > int(self.fps * 8):
-                        self._calculate_all_metrics()
+                # Capture face photo (first good frame), only once we know
+                # it's a reasonably sized, genuine face detection.
+                if app_state.face_photo is None and w_face >= 80 and h_face >= 80:
+                    app_state.face_photo = img[y:y+h_face, x:x+w_face].copy()
 
-                    # Draw ROI
-                    cv2.rectangle(img, (rx1, ry1), (rx2, ry2), (0, 255, 0), 2)
-                    cv2.putText(img, "ROI", (rx1, ry1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                # Maintain 15-second buffer
+                if len(self.green_signal) > int(self.fps * 15):
+                    self.green_signal.pop(0)
+
+                # Calculate metrics every second
+                if self.frame_count % max(1, int(self.fps)) == 0 and len(self.green_signal) > int(self.fps * 8):
+                    self._calculate_all_metrics()
+
+                # Draw ROI
+                cv2.rectangle(img, (rx1, ry1), (rx2, ry2), (0, 255, 0), 2)
+                cv2.putText(img, "ROI", (rx1, ry1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
         else:
             self._local_last_status = "✗ No Face"
 
@@ -505,6 +534,11 @@ with st.sidebar:
     st.title("⚙️ Control Panel")
     app_state.patient_name = st.text_input("Patient Name:", placeholder="Enter full name")
     st.markdown("---")
+    if st.button("🔄 Start New Scan (Reset)", use_container_width=True):
+        reset_scan_state()
+        st.rerun()
+    st.caption("Clears BPM, HRV, respiration, stress, charts and the report — use this between patients or before rescanning, instead of rebooting the whole app.")
+    st.markdown("---")
     st.subheader("📋 Instructions")
     st.info("""
     1. Enter your name above
@@ -548,6 +582,9 @@ with col2:
 
         if not playing and has_data:
             st.info("⏹️ Recording stopped — showing your last results below.")
+            if st.button("🔄 Start a New Scan", use_container_width=True, key="reset_from_dashboard"):
+                reset_scan_state()
+                st.rerun()
 
         col_a, col_b = st.columns(2)
         with col_a:
