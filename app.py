@@ -269,16 +269,32 @@ class rPPGProcessor(VideoProcessorBase):
             mean_power = np.mean(psd)
             app_state.sqi = min(100.0, (max_power / mean_power) * 15.0) if mean_power > 0 else 0
 
-            # Peak detection for HRV
-            peaks, _ = find_peaks(filtered_signal, distance=int(0.5 * actual_fs), height=0)
+            # Peak detection for HRV. height=0 (any positive bump counts)
+            # is too lenient for a noisy webcam-derived signal — small
+            # ripples get counted as heartbeats. Requiring a minimum
+            # prominence relative to the signal's own amplitude filters
+            # out most of that noise.
+            peak_height_threshold = 0.3 * np.std(filtered_signal)
+            peaks, _ = find_peaks(filtered_signal, distance=int(0.5 * actual_fs), height=peak_height_threshold)
             if len(peaks) > 2:
                 rr_intervals = (np.diff(peaks) / actual_fs) * 1000.0  # in milliseconds
-                diff_rr = np.diff(rr_intervals)
-                app_state.hrv = np.sqrt(np.mean(diff_rr**2))
 
-                # Stress Index
-                normalized_hrv = np.clip(app_state.hrv / 100.0, 0, 1)
-                app_state.stress_index = (1 - normalized_hrv) * 100
+                # Discard physiologically implausible intervals (outside
+                # roughly 40-180 BPM equivalent). A handful of spurious or
+                # missed peaks can otherwise inflate RMSSD to unrealistic
+                # values even when most of the signal is genuinely good.
+                plausible_mask = (rr_intervals >= 333) & (rr_intervals <= 1500)
+                rr_intervals = rr_intervals[plausible_mask]
+
+                if len(rr_intervals) > 2:
+                    diff_rr = np.diff(rr_intervals)
+                    app_state.hrv = np.sqrt(np.mean(diff_rr**2))
+
+                    # Stress Index — normalized against a slightly wider
+                    # HRV range (0-120ms) since healthy resting HRV can
+                    # reasonably reach 100-120ms, not just 100.
+                    normalized_hrv = np.clip(app_state.hrv / 120.0, 0, 1)
+                    app_state.stress_index = (1 - normalized_hrv) * 100
 
         # Respiratory Rate (0.15-0.5 Hz band)
         low_rr, high_rr = 0.15 / nyquist, 0.5 / nyquist
