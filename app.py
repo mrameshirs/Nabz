@@ -19,6 +19,18 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER, TA_LEFT
 
 # -----------------------------------------------------------------------------
+# PAGE CONFIG — MUST be the very first Streamlit command in the script,
+# before any other st.* call (including st.error inside functions called
+# below), or Streamlit raises a StreamlitAPIException.
+# -----------------------------------------------------------------------------
+st.set_page_config(
+    page_title="Nabz Pro - Advanced Health Monitoring",
+    page_icon="💓",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# -----------------------------------------------------------------------------
 # WEBRTC ICE CONFIGURATION — TURN (not just STUN)
 # -----------------------------------------------------------------------------
 # STUN alone only works when direct peer-to-peer UDP is possible. If either
@@ -362,13 +374,6 @@ def generate_pdf_report():
 # -----------------------------------------------------------------------------
 # STREAMLIT UI
 # -----------------------------------------------------------------------------
-st.set_page_config(
-    page_title="Nabz Pro - Advanced Health Monitoring",
-    page_icon="💓",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;700;900&display=swap');
