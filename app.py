@@ -280,11 +280,14 @@ class rPPGProcessor(VideoProcessorBase):
             peak_height_threshold = 0.15 * np.std(filtered_signal)
             peaks, _ = find_peaks(filtered_signal, distance=int(0.5 * actual_fs), height=peak_height_threshold)
 
-            # Require a handful of beats before trusting an HRV estimate —
-            # but not so many that a short recording window can never
-            # satisfy it. An 8-second window at 60-100 BPM yields roughly
-            # 8-13 beats, so 4 is a reasonable practical floor.
-            if len(peaks) >= 4:
+            # Need enough raw peaks that even after outlier filtering
+            # removes a few, at least 6 clean intervals can survive —
+            # diffing N peaks always yields N-1 intervals, so requiring
+            # fewer raw peaks than that would make the downstream 6-interval
+            # requirement mathematically impossible to reach. The buffer
+            # holds up to 15 seconds of signal (not just 8), so 8+ peaks is
+            # realistic at a normal resting heart rate once it fills up.
+            if len(peaks) >= 8:
                 # Sub-frame (parabolic) interpolation of each peak's true
                 # position, rather than snapping to the nearest whole frame.
                 # At typical webcam frame rates (~30fps), one frame is
@@ -717,10 +720,12 @@ with col2:
                 <div class="metric-value" style="color: #EC4899;">{app_state.bpm:.0f}</div>
                 <div class="metric-unit">BPM</div></div>""", unsafe_allow_html=True)
         with col_b:
+            hrv_display = f"{app_state.hrv:.1f}" if app_state.hrv_confidence == "good" else "—"
+            hrv_note = "milliseconds" if app_state.hrv_confidence == "good" else "gathering clean beats..."
             st.markdown(f"""<div class="metric-card" style="border-bottom: 4px solid #10B981;">
                 <div class="metric-label">HRV</div>
-                <div class="metric-value" style="color: #10B981;">{app_state.hrv:.1f}</div>
-                <div class="metric-unit">milliseconds</div></div>""", unsafe_allow_html=True)
+                <div class="metric-value" style="color: #10B981;">{hrv_display}</div>
+                <div class="metric-unit">{hrv_note}</div></div>""", unsafe_allow_html=True)
 
         col_c, col_d = st.columns(2)
         with col_c:
@@ -729,12 +734,21 @@ with col2:
                 <div class="metric-value" style="color: #06B6D4;">{app_state.rr:.1f}</div>
                 <div class="metric-unit">breaths/min</div></div>""", unsafe_allow_html=True)
         with col_d:
-            stress_color = "#10B981" if app_state.stress_index < 50 else "#F59E0B" if app_state.stress_index < 75 else "#EF4444"
-            stress_label = "Low" if app_state.stress_index < 50 else "Moderate" if app_state.stress_index < 75 else "High"
+            if app_state.hrv_confidence == "good":
+                stress_color = "#10B981" if app_state.stress_index < 50 else "#F59E0B" if app_state.stress_index < 75 else "#EF4444"
+                stress_label = "Low" if app_state.stress_index < 50 else "Moderate" if app_state.stress_index < 75 else "High"
+                stress_display = f"{app_state.stress_index:.0f}"
+            else:
+                stress_color = "#64748b"
+                stress_label = "Needs more clean beats"
+                stress_display = "—"
             st.markdown(f"""<div class="metric-card" style="border-bottom: 4px solid {stress_color};">
                 <div class="metric-label">Stress Index</div>
-                <div class="metric-value" style="color: {stress_color};">{app_state.stress_index:.0f}</div>
+                <div class="metric-value" style="color: {stress_color};">{stress_display}</div>
                 <div class="metric-unit">{stress_label}</div></div>""", unsafe_allow_html=True)
+
+        if app_state.hrv_confidence != "good":
+            st.caption("💡 HRV/Stress need several consecutive clean heartbeats to compute reliably — this is normal in the first few seconds, or if lighting/movement is disrupting the signal.")
 
         st.markdown("---")
         sqi_color = "green" if app_state.sqi > 70 else "orange" if app_state.sqi > 40 else "red"
