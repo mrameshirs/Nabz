@@ -620,13 +620,6 @@ with col1:
     )
     if ctx.state.playing:
         st.success("✅ Camera Active - Recording Vitals")
-        # Track when this scan session actually started, for the countdown.
-        # This lives in plain session state (not the cross-process shared
-        # app_state) since it's a per-browser-session UI concern — simpler
-        # and more reliable than trying to time it from inside the video
-        # processor's constructor.
-        if st.session_state.get("scan_start_time") is None:
-            st.session_state.scan_start_time = time.time()
     else:
         st.warning("⚠️ Click START above to begin monitoring")
         st.session_state.scan_start_time = None
@@ -639,7 +632,7 @@ with col2:
     # rerunning the whole page (which would otherwise restart/interrupt the
     # webrtc_streamer component and drop the active connection).
     @st.fragment(run_every=1)
-    def render_dashboard(playing: bool, scan_start_time):
+    def render_dashboard(playing: bool):
         has_data = len(app_state.data_log) > 0
 
         if not playing and not has_data:
@@ -653,7 +646,18 @@ with col2:
                 st.session_state.scan_start_time = None
                 st.rerun()
 
+        # Start the 60-second countdown only once a face has actually been
+        # detected — not merely when the camera turns on — since the time
+        # spent finding a good angle/lighting shouldn't eat into the scan.
+        if playing and st.session_state.get("scan_start_time") is None and app_state.status == "✓ Signal Acquired":
+            st.session_state.scan_start_time = time.time()
+
+        scan_start_time = st.session_state.get("scan_start_time")
+
         SCAN_TARGET_SECONDS = 60
+
+        if playing and not scan_start_time:
+            st.info("👀 Looking for your face — the 60-second timer will start once detected.")
 
         if playing and scan_start_time:
             elapsed = time.time() - scan_start_time
@@ -760,7 +764,7 @@ with col2:
         else:
             st.warning("Recording was too short to generate a full report (needs at least 15 seconds of data).")
 
-    render_dashboard(ctx.state.playing, st.session_state.get("scan_start_time"))
+    render_dashboard(ctx.state.playing)
 
 # -----------------------------------------------------------------------------
 # HOW IT WORKS — AI/ML PIPELINE EXPLAINER
