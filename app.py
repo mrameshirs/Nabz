@@ -302,35 +302,46 @@ class rPPGProcessor(VideoProcessorBase):
 
                 rr_intervals = (np.diff(refined_peaks) / actual_fs) * 1000.0  # in milliseconds
 
-                # Discard physiologically implausible intervals (outside
-                # roughly 40-180 BPM equivalent). A handful of spurious or
-                # missed peaks can otherwise inflate RMSSD to unrealistic
-                # values even when most of the signal is genuinely good.
+                # First pass: discard grossly implausible intervals (outside
+                # roughly 40-180 BPM equivalent).
                 plausible_mask = (rr_intervals >= 333) & (rr_intervals <= 1500)
                 rr_intervals = rr_intervals[plausible_mask]
+
+                # Second pass: this is the important one. RMSSD depends on
+                # DIFFERENCES between consecutive intervals — so noisy
+                # intervals that alternate between individually-plausible
+                # values (e.g. 600ms, 1200ms, 650ms) can each pass the check
+                # above while still producing a huge, meaningless RMSSD.
+                # Filtering against the *median* interval catches this
+                # regardless of which direction the noise pushes.
+                if len(rr_intervals) >= 3:
+                    median_interval = np.median(rr_intervals)
+                    if median_interval > 0:
+                        deviation_mask = (rr_intervals >= 0.6 * median_interval) & (rr_intervals <= 1.6 * median_interval)
+                        rr_intervals = rr_intervals[deviation_mask]
 
                 if len(rr_intervals) >= 3:
                     diff_rr = np.diff(rr_intervals)
                     new_hrv_estimate = np.sqrt(np.mean(diff_rr**2))
-                    # Extra sanity clamp: even after interpolation and
-                    # filtering, discard estimates far outside any
-                    # realistic physiological range rather than displaying
-                    # them.
-                    if new_hrv_estimate <= 200:
-                        # Smooth over time (exponential moving average)
-                        # instead of replacing the displayed value outright
-                        # each window — one noisy 8-second snapshot
-                        # shouldn't swing the number from 30 to 400.
-                        if app_state.hrv and app_state.hrv > 0:
-                            app_state.hrv = 0.7 * app_state.hrv + 0.3 * new_hrv_estimate
-                        else:
-                            app_state.hrv = new_hrv_estimate
+                    # Cap rather than fully discard an out-of-range estimate
+                    # — a capped, imperfect number is far more useful than
+                    # silently leaving HRV/stress at 0 for the whole scan.
+                    new_hrv_estimate = min(new_hrv_estimate, 150.0)
 
-                        # Stress Index — normalized against a slightly wider
-                        # HRV range (0-120ms) since healthy resting HRV can
-                        # reasonably reach 100-120ms, not just 100.
-                        normalized_hrv = np.clip(app_state.hrv / 120.0, 0, 1)
-                        app_state.stress_index = (1 - normalized_hrv) * 100
+                    # Smooth over time (exponential moving average) instead
+                    # of replacing the displayed value outright each window
+                    # — one noisy 8-second snapshot shouldn't swing the
+                    # number wildly.
+                    if app_state.hrv and app_state.hrv > 0:
+                        app_state.hrv = 0.7 * app_state.hrv + 0.3 * new_hrv_estimate
+                    else:
+                        app_state.hrv = new_hrv_estimate
+
+                    # Stress Index — normalized against a slightly wider
+                    # HRV range (0-120ms) since healthy resting HRV can
+                    # reasonably reach 100-120ms, not just 100.
+                    normalized_hrv = np.clip(app_state.hrv / 120.0, 0, 1)
+                    app_state.stress_index = (1 - normalized_hrv) * 100
 
         # Respiratory Rate (0.15-0.5 Hz band)
         low_rr, high_rr = 0.15 / nyquist, 0.5 / nyquist
