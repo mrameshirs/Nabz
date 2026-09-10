@@ -95,6 +95,7 @@ def get_shared_state():
     d = manager.dict()
     d["bpm"] = 0.0
     d["hrv"] = 0.0
+    d["hrv_confidence"] = "low"  # "low" until enough clean beats are seen to trust the RMSSD estimate
     d["rr"] = 0.0
     d["stress_index"] = 0.0
     d["sqi"] = 0.0
@@ -120,6 +121,7 @@ def reset_scan_state():
     left as-is in case the same person is doing another scan."""
     app_state.bpm = 0.0
     app_state.hrv = 0.0
+    app_state.hrv_confidence = "low"
     app_state.rr = 0.0
     app_state.stress_index = 0.0
     app_state.sqi = 0.0
@@ -307,41 +309,49 @@ class rPPGProcessor(VideoProcessorBase):
                 plausible_mask = (rr_intervals >= 333) & (rr_intervals <= 1500)
                 rr_intervals = rr_intervals[plausible_mask]
 
-                # Second pass: this is the important one. RMSSD depends on
-                # DIFFERENCES between consecutive intervals — so noisy
-                # intervals that alternate between individually-plausible
-                # values (e.g. 600ms, 1200ms, 650ms) can each pass the check
-                # above while still producing a huge, meaningless RMSSD.
-                # Filtering against the *median* interval catches this
-                # regardless of which direction the noise pushes.
+                # Second pass: RMSSD depends on DIFFERENCES between
+                # consecutive intervals — so noisy intervals that alternate
+                # between individually-plausible values (e.g. 600ms, 1200ms,
+                # 650ms) can each pass the check above while still producing
+                # a huge, meaningless RMSSD. Filtering against the *median*
+                # interval catches this regardless of which direction the
+                # noise pushes.
                 if len(rr_intervals) >= 3:
                     median_interval = np.median(rr_intervals)
                     if median_interval > 0:
                         deviation_mask = (rr_intervals >= 0.6 * median_interval) & (rr_intervals <= 1.6 * median_interval)
                         rr_intervals = rr_intervals[deviation_mask]
 
-                if len(rr_intervals) >= 3:
+                # Require MORE surviving intervals than before (6, not 3).
+                # A 3-interval RMSSD is one bad beat away from garbage; 6
+                # gives real statistical grounding. If the signal can't
+                # produce this many clean intervals, we honestly mark HRV
+                # as low-confidence instead of forcing out a number.
+                if len(rr_intervals) >= 6:
                     diff_rr = np.diff(rr_intervals)
                     new_hrv_estimate = np.sqrt(np.mean(diff_rr**2))
-                    # Cap rather than fully discard an out-of-range estimate
-                    # — a capped, imperfect number is far more useful than
-                    # silently leaving HRV/stress at 0 for the whole scan.
-                    new_hrv_estimate = min(new_hrv_estimate, 150.0)
 
-                    # Smooth over time (exponential moving average) instead
-                    # of replacing the displayed value outright each window
-                    # — one noisy 8-second snapshot shouldn't swing the
-                    # number wildly.
-                    if app_state.hrv and app_state.hrv > 0:
-                        app_state.hrv = 0.7 * app_state.hrv + 0.3 * new_hrv_estimate
+                    # Only accept if it's in a genuinely realistic range —
+                    # reject outright (don't cap, don't fake it) if not.
+                    if new_hrv_estimate <= 150:
+                        if app_state.hrv and app_state.hrv > 0:
+                            app_state.hrv = 0.7 * app_state.hrv + 0.3 * new_hrv_estimate
+                        else:
+                            app_state.hrv = new_hrv_estimate
+                        app_state.hrv_confidence = "good"
+
+                        # Stress Index normalization ceiling now matches the
+                        # same 150ms bound used above, so there's no
+                        # mismatch that could mathematically force stress
+                        # to 0 whenever HRV is on the high end.
+                        normalized_hrv = np.clip(app_state.hrv / 150.0, 0, 1)
+                        app_state.stress_index = (1 - normalized_hrv) * 100
                     else:
-                        app_state.hrv = new_hrv_estimate
-
-                    # Stress Index — normalized against a slightly wider
-                    # HRV range (0-120ms) since healthy resting HRV can
-                    # reasonably reach 100-120ms, not just 100.
-                    normalized_hrv = np.clip(app_state.hrv / 120.0, 0, 1)
-                    app_state.stress_index = (1 - normalized_hrv) * 100
+                        app_state.hrv_confidence = "low"
+                else:
+                    app_state.hrv_confidence = "low"
+            else:
+                app_state.hrv_confidence = "low"
 
         # Respiratory Rate (0.15-0.5 Hz band)
         low_rr, high_rr = 0.15 / nyquist, 0.5 / nyquist
