@@ -62,28 +62,56 @@ RTC_CONFIGURATION = RTCConfiguration({"iceServers": get_ice_servers()})
 # -----------------------------------------------------------------------------
 # GLOBAL STATE MANAGEMENT
 # -----------------------------------------------------------------------------
-class AppState:
-    def __init__(self):
-        self.bpm = 0.0
-        self.hrv = 0.0
-        self.rr = 0.0
-        self.stress_index = 0.0
-        self.sqi = 0.0
-        self.status = "Awaiting Face..."
-        self.ppg_signal = []
-        self.face_photo = None
-        self.patient_name = ""
-        self.recording_start = None
-        self.data_log = []
-        # Debug counters — help diagnose whether recv() is actually running
-        # and updating this exact object instance.
-        self.debug_frame_count = 0
-        self.debug_faces_detected_count = 0
-        self.debug_last_update = None
-        self.debug_object_id = None  # set below, unique per AppState instance
+# IMPORTANT: streamlit-webrtc's frame callbacks do NOT share plain Python
+# global state with the main Streamlit script the way a normal function call
+# would. A plain module-level object (the old AppState() approach) silently
+# ends up as two different objects: recv() writes to one, and the Streamlit
+# script's rendering reads a different, never-updated one. A
+# multiprocessing.Manager-backed dict uses real IPC under the hood, so both
+# sides reliably see the same data regardless of how streamlit-webrtc
+# schedules the callback.
+import multiprocessing
 
-app_state = AppState()
-app_state.debug_object_id = id(app_state)
+class SharedAppState:
+    """Thin attribute-style wrapper around a Manager dict proxy, so the rest
+    of the code can keep writing app_state.bpm = ... instead of
+    app_state_dict['bpm'] = ... everywhere."""
+    def __init__(self, manager_dict):
+        object.__setattr__(self, "_d", manager_dict)
+
+    def __getattr__(self, name):
+        try:
+            return self._d[name]
+        except KeyError:
+            raise AttributeError(name)
+
+    def __setattr__(self, name, value):
+        self._d[name] = value
+
+@st.cache_resource
+def get_shared_state():
+    manager = multiprocessing.Manager()
+    d = manager.dict()
+    d["bpm"] = 0.0
+    d["hrv"] = 0.0
+    d["rr"] = 0.0
+    d["stress_index"] = 0.0
+    d["sqi"] = 0.0
+    d["status"] = "Awaiting Face..."
+    d["ppg_signal"] = []
+    d["face_photo"] = None
+    d["patient_name"] = ""
+    d["recording_start"] = None
+    d["data_log"] = []
+    # Debug counters — help diagnose whether recv() is actually running
+    # and updating this exact shared state.
+    d["debug_frame_count"] = 0
+    d["debug_faces_detected_count"] = 0
+    d["debug_last_update"] = None
+    d["debug_object_id"] = id(d)
+    return SharedAppState(d)
+
+app_state = get_shared_state()
 
 # -----------------------------------------------------------------------------
 # OPENCV HAAR CASCADE SETUP (Replaces MediaPipe)
@@ -100,11 +128,15 @@ class rPPGProcessor(VideoProcessorBase):
         self.last_time = time.time()
         self.frame_count = 0
         self.last_faces = []  # cache last detection result between throttled runs
+        # Local-only counters, synced to shared state once per second
+        # (not every frame) to avoid excessive Manager IPC overhead.
+        self._local_frames_since_sync = 0
+        self._local_faces_since_sync = 0
+        self._local_last_status = "Awaiting Face..."
 
     def recv(self, frame):
         img = frame.to_ndarray(format="rgb24")
-        app_state.debug_frame_count += 1
-        app_state.debug_last_update = datetime.now().strftime('%H:%M:%S.%f')[:-3]
+        self._local_frames_since_sync += 1
         h, w, _ = img.shape
 
         # Calculate FPS
@@ -114,6 +146,13 @@ class rPPGProcessor(VideoProcessorBase):
             self.fps = self.frame_count / (current_time - self.last_time)
             self.frame_count = 0
             self.last_time = current_time
+            # Sync debug/status info to shared state once per second.
+            app_state.debug_frame_count = app_state.debug_frame_count + self._local_frames_since_sync
+            app_state.debug_faces_detected_count = app_state.debug_faces_detected_count + self._local_faces_since_sync
+            app_state.debug_last_update = datetime.now().strftime('%H:%M:%S.%f')[:-3]
+            app_state.status = self._local_last_status
+            self._local_frames_since_sync = 0
+            self._local_faces_since_sync = 0
 
         # Throttle face detection to every 3rd frame. Haar cascades are
         # relatively expensive; running them on every frame at 30fps adds
@@ -129,8 +168,8 @@ class rPPGProcessor(VideoProcessorBase):
         faces = self.last_faces
 
         if len(faces) > 0:
-            app_state.status = "✓ Signal Acquired"
-            app_state.debug_faces_detected_count += 1
+            self._local_last_status = "✓ Signal Acquired"
+            self._local_faces_since_sync += 1
             for (x, y, w_face, h_face) in faces:
                 # Extract Forehead ROI (Top 35% of the face bounding box)
                 rx1 = int(x + w_face * 0.25)
@@ -159,7 +198,7 @@ class rPPGProcessor(VideoProcessorBase):
                     cv2.rectangle(img, (rx1, ry1), (rx2, ry2), (0, 255, 0), 2)
                     cv2.putText(img, "ROI", (rx1, ry1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
         else:
-            app_state.status = "✗ No Face"
+            self._local_last_status = "✗ No Face"
 
         # Overlay metrics
         cv2.putText(img, f"BPM: {app_state.bpm:.0f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
@@ -230,16 +269,18 @@ class rPPGProcessor(VideoProcessorBase):
         if app_state.recording_start is None:
             app_state.recording_start = datetime.now()
 
-        app_state.data_log.append({
+        new_log_entry = {
             'time': datetime.now(),
             'bpm': app_state.bpm,
             'hrv': app_state.hrv,
             'rr': app_state.rr,
             'stress': app_state.stress_index
-        })
-
-        if len(app_state.data_log) > 60:
-            app_state.data_log.pop(0)
+        }
+        current_log = app_state.data_log  # this is a local copy from the Manager proxy
+        current_log.append(new_log_entry)
+        if len(current_log) > 60:
+            current_log.pop(0)
+        app_state.data_log = current_log  # reassign so the change actually persists
 
 # -----------------------------------------------------------------------------
 # PDF REPORT GENERATION
