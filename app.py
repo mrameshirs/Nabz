@@ -103,6 +103,7 @@ def get_shared_state():
     d["face_photo"] = None
     d["patient_name"] = ""
     d["recording_start"] = None
+    d["scan_start_time"] = None  # wall-clock time.time() when this camera session began, for the countdown
     d["data_log"] = []
     # Debug counters — help diagnose whether recv() is actually running
     # and updating this exact shared state.
@@ -127,6 +128,7 @@ def reset_scan_state():
     app_state.ppg_signal = []
     app_state.face_photo = None
     app_state.recording_start = None
+    app_state.scan_start_time = None
     app_state.data_log = []
     app_state.debug_frame_count = 0
     app_state.debug_faces_detected_count = 0
@@ -152,6 +154,10 @@ class rPPGProcessor(VideoProcessorBase):
         self._local_frames_since_sync = 0
         self._local_faces_since_sync = 0
         self._local_last_status = "Awaiting Face..."
+        # Mark the start of this scan session for the on-screen countdown.
+        # A fresh rPPGProcessor is created each time the camera is started,
+        # so this correctly resets on every new scan.
+        app_state.scan_start_time = time.time()
 
     def recv(self, frame):
         img = frame.to_ndarray(format="rgb24")
@@ -276,8 +282,30 @@ class rPPGProcessor(VideoProcessorBase):
             # out most of that noise.
             peak_height_threshold = 0.3 * np.std(filtered_signal)
             peaks, _ = find_peaks(filtered_signal, distance=int(0.5 * actual_fs), height=peak_height_threshold)
-            if len(peaks) > 2:
-                rr_intervals = (np.diff(peaks) / actual_fs) * 1000.0  # in milliseconds
+
+            # Require several beats before trusting an HRV estimate at all.
+            # With only 2-3 peaks, RMSSD is computed from just 1-2
+            # differences — statistically meaningless and highly sensitive
+            # to a single frame of timing jitter.
+            if len(peaks) >= 6:
+                # Sub-frame (parabolic) interpolation of each peak's true
+                # position, rather than snapping to the nearest whole frame.
+                # At typical webcam frame rates (~30fps), one frame is
+                # ~33ms — comparable to real HRV itself — so this
+                # meaningfully reduces quantization noise in beat timing.
+                refined_peaks = []
+                for p in peaks:
+                    if 0 < p < len(filtered_signal) - 1:
+                        y0, y1, y2 = filtered_signal[p-1], filtered_signal[p], filtered_signal[p+1]
+                        denom = (y0 - 2*y1 + y2)
+                        offset = 0.5 * (y0 - y2) / denom if denom != 0 else 0.0
+                        offset = np.clip(offset, -0.5, 0.5)  # sanity bound
+                        refined_peaks.append(p + offset)
+                    else:
+                        refined_peaks.append(float(p))
+                refined_peaks = np.array(refined_peaks)
+
+                rr_intervals = (np.diff(refined_peaks) / actual_fs) * 1000.0  # in milliseconds
 
                 # Discard physiologically implausible intervals (outside
                 # roughly 40-180 BPM equivalent). A handful of spurious or
@@ -286,15 +314,28 @@ class rPPGProcessor(VideoProcessorBase):
                 plausible_mask = (rr_intervals >= 333) & (rr_intervals <= 1500)
                 rr_intervals = rr_intervals[plausible_mask]
 
-                if len(rr_intervals) > 2:
+                if len(rr_intervals) >= 5:
                     diff_rr = np.diff(rr_intervals)
-                    app_state.hrv = np.sqrt(np.mean(diff_rr**2))
+                    new_hrv_estimate = np.sqrt(np.mean(diff_rr**2))
+                    # Extra sanity clamp: even after interpolation and
+                    # filtering, discard estimates far outside any
+                    # realistic physiological range rather than displaying
+                    # them.
+                    if new_hrv_estimate <= 200:
+                        # Smooth over time (exponential moving average)
+                        # instead of replacing the displayed value outright
+                        # each window — one noisy 8-second snapshot
+                        # shouldn't swing the number from 30 to 400.
+                        if app_state.hrv and app_state.hrv > 0:
+                            app_state.hrv = 0.7 * app_state.hrv + 0.3 * new_hrv_estimate
+                        else:
+                            app_state.hrv = new_hrv_estimate
 
-                    # Stress Index — normalized against a slightly wider
-                    # HRV range (0-120ms) since healthy resting HRV can
-                    # reasonably reach 100-120ms, not just 100.
-                    normalized_hrv = np.clip(app_state.hrv / 120.0, 0, 1)
-                    app_state.stress_index = (1 - normalized_hrv) * 100
+                        # Stress Index — normalized against a slightly wider
+                        # HRV range (0-120ms) since healthy resting HRV can
+                        # reasonably reach 100-120ms, not just 100.
+                        normalized_hrv = np.clip(app_state.hrv / 120.0, 0, 1)
+                        app_state.stress_index = (1 - normalized_hrv) * 100
 
         # Respiratory Rate (0.15-0.5 Hz band)
         low_rr, high_rr = 0.15 / nyquist, 0.5 / nyquist
