@@ -1,0 +1,10 @@
+streamlit
+streamlit-webrtc
+streamlit-autorefresh
+opencv-python
+mediapipe
+scipy
+numpy
+matplotlib
+Pillow
+reportlab
