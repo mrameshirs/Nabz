@@ -272,7 +272,7 @@ class rPPGProcessor(VideoProcessorBase):
             # Peak detection for HRV
             peaks, _ = find_peaks(filtered_signal, distance=int(0.5 * actual_fs), height=0)
             if len(peaks) > 2:
-                rr_intervals = np.diff(peaks) / actual_fs  # in seconds
+                rr_intervals = (np.diff(peaks) / actual_fs) * 1000.0  # in milliseconds
                 diff_rr = np.diff(rr_intervals)
                 app_state.hrv = np.sqrt(np.mean(diff_rr**2))
 
@@ -525,6 +525,11 @@ st.markdown("""
     <h1 style="margin:0; font-size:2.5rem; font-weight:900;">💓 Nabz Pro Health Monitor</h1>
     <p style="margin:8px 0 0 0; font-size:1.1rem; font-weight:600; opacity:0.95;">
         AI-Powered Contactless Vital Signs & Stress Analysis
+    </p>
+    <p style="margin:10px 0 0 0; font-size:0.85rem; font-weight:400; opacity:0.85; max-width: 800px; margin-left:auto; margin-right:auto;">
+        Contactless monitoring matters most where physical sensors are risky or impractical — infectious-disease
+        isolation wards (reducing cross-contamination), burn units and fragile neonatal skin, ICU patients on
+        long-term monitoring, and mass-casualty triage where speed matters more than wiring someone up.
     </p>
 </div>
 """, unsafe_allow_html=True)
