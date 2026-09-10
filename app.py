@@ -75,8 +75,15 @@ class AppState:
         self.patient_name = ""
         self.recording_start = None
         self.data_log = []
+        # Debug counters — help diagnose whether recv() is actually running
+        # and updating this exact object instance.
+        self.debug_frame_count = 0
+        self.debug_faces_detected_count = 0
+        self.debug_last_update = None
+        self.debug_object_id = None  # set below, unique per AppState instance
 
 app_state = AppState()
+app_state.debug_object_id = id(app_state)
 
 # -----------------------------------------------------------------------------
 # OPENCV HAAR CASCADE SETUP (Replaces MediaPipe)
@@ -96,6 +103,8 @@ class rPPGProcessor(VideoProcessorBase):
 
     def recv(self, frame):
         img = frame.to_ndarray(format="rgb24")
+        app_state.debug_frame_count += 1
+        app_state.debug_last_update = datetime.now().strftime('%H:%M:%S.%f')[:-3]
         h, w, _ = img.shape
 
         # Calculate FPS
@@ -121,6 +130,7 @@ class rPPGProcessor(VideoProcessorBase):
 
         if len(faces) > 0:
             app_state.status = "✓ Signal Acquired"
+            app_state.debug_faces_detected_count += 1
             for (x, y, w_face, h_face) in faces:
                 # Extract Forehead ROI (Top 35% of the face bounding box)
                 rx1 = int(x + w_face * 0.25)
@@ -462,6 +472,21 @@ with col2:
 
         if not playing and has_data:
             st.info("⏹️ Recording stopped — showing your last results below.")
+
+        with st.expander("🔧 Debug info (temporary — remove once things work)", expanded=True):
+            st.caption(
+                f"App state object id: `{app_state.debug_object_id}` | "
+                f"Frames processed: **{app_state.debug_frame_count}** | "
+                f"Faces detected (cumulative): **{app_state.debug_faces_detected_count}** | "
+                f"Last recv() update: **{app_state.debug_last_update or 'never'}** | "
+                f"Signal buffer entries logged: **{len(app_state.data_log)}**"
+            )
+            st.caption(
+                "If 'Frames processed' stays at 0 or never changes between refreshes, "
+                "the video thread isn't updating this object — a state-sharing bug. "
+                "If it climbs steadily but 'Faces detected' stays at 0, detection itself "
+                "is the problem. If both climb but BPM stays 0, the signal math needs work."
+            )
 
         col_a, col_b = st.columns(2)
         with col_a:
