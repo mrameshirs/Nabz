@@ -447,7 +447,22 @@ with col1:
 
 with col2:
     st.subheader("📊 Real-Time Dashboard")
-    if ctx.state.playing:
+
+    # Wrapped in a fragment with run_every so this section re-renders on its
+    # own every second and picks up the latest app_state values, without
+    # rerunning the whole page (which would otherwise restart/interrupt the
+    # webrtc_streamer component and drop the active connection).
+    @st.fragment(run_every=1)
+    def render_dashboard(playing: bool):
+        has_data = len(app_state.data_log) > 0
+
+        if not playing and not has_data:
+            st.info("👆 Start camera to see metrics")
+            return
+
+        if not playing and has_data:
+            st.info("⏹️ Recording stopped — showing your last results below.")
+
         col_a, col_b = st.columns(2)
         with col_a:
             st.markdown(f"""<div class="metric-card" style="border-bottom: 4px solid #EC4899;">
@@ -493,10 +508,12 @@ with col2:
                 mime="application/pdf",
                 use_container_width=True
             )
-        else:
+        elif playing:
             st.warning(f"⏳ Collecting data... {len(app_state.data_log)}/30 seconds")
-    else:
-        st.info("👆 Start camera to see metrics")
+        else:
+            st.warning("Recording was too short to generate a full report (needs at least 30 seconds of data).")
+
+    render_dashboard(ctx.state.playing)
 
 st.markdown("""
 <div style="text-align: center; padding: 20px; color: #64748b; border-top: 1px solid #1e293b; margin-top: 30px;">
