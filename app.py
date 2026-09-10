@@ -3,6 +3,7 @@ from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode, RT
 import av
 import cv2
 import numpy as np
+import pandas as pd
 from scipy.signal import butter, filtfilt, welch, find_peaks
 import time
 from datetime import datetime
@@ -453,6 +454,40 @@ st.markdown("""
 .metric-value { font-size: 2.5rem; font-weight: 900; margin: 10px 0; }
 .metric-label { font-size: 0.9rem; color: #94a3b8; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; }
 .metric-unit { font-size: 1rem; color: #64748b; margin-top: 5px; }
+
+.pipeline-flow {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: stretch;
+    justify-content: center;
+    gap: 8px;
+    margin: 20px 0;
+}
+.pipeline-step {
+    flex: 1 1 140px;
+    min-width: 130px;
+    max-width: 170px;
+    border-radius: 14px;
+    padding: 14px 10px;
+    text-align: center;
+    color: white;
+    box-shadow: 0 6px 16px rgba(0,0,0,0.15);
+}
+.pipeline-step .step-icon { font-size: 1.6rem; margin-bottom: 4px; }
+.pipeline-step .step-title { font-size: 0.8rem; font-weight: 800; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
+.pipeline-step .step-desc { font-size: 0.72rem; opacity: 0.95; line-height: 1.3; }
+.pipeline-arrow { display: flex; align-items: center; font-size: 1.4rem; color: #94a3b8; padding: 0 2px; }
+
+.param-card {
+    border-radius: 16px;
+    padding: 18px;
+    color: white;
+    box-shadow: 0 8px 20px rgba(0,0,0,0.25);
+    height: 100%;
+}
+.param-card .param-title { font-size: 1rem; font-weight: 900; margin-bottom: 8px; }
+.param-card .param-tech { font-size: 0.78rem; opacity: 0.95; line-height: 1.5; }
+.param-card .param-tech b { font-weight: 800; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -514,21 +549,6 @@ with col2:
         if not playing and has_data:
             st.info("⏹️ Recording stopped — showing your last results below.")
 
-        with st.expander("🔧 Debug info (temporary — remove once things work)", expanded=True):
-            st.caption(
-                f"App state object id: `{app_state.debug_object_id}` | "
-                f"Frames processed: **{app_state.debug_frame_count}** | "
-                f"Faces detected (cumulative): **{app_state.debug_faces_detected_count}** | "
-                f"Last recv() update: **{app_state.debug_last_update or 'never'}** | "
-                f"Signal buffer entries logged: **{len(app_state.data_log)}**"
-            )
-            st.caption(
-                "If 'Frames processed' stays at 0 or never changes between refreshes, "
-                "the video thread isn't updating this object — a state-sharing bug. "
-                "If it climbs steadily but 'Faces detected' stays at 0, detection itself "
-                "is the problem. If both climb but BPM stays 0, the signal math needs work."
-            )
-
         col_a, col_b = st.columns(2)
         with col_a:
             st.markdown(f"""<div class="metric-card" style="border-bottom: 4px solid #EC4899;">
@@ -565,7 +585,32 @@ with col2:
             st.line_chart(app_state.ppg_signal, use_container_width=True, height=200)
 
         st.markdown("---")
-        if len(app_state.data_log) > 30:
+        st.markdown("**📊 Trends Over Time**")
+        if len(app_state.data_log) > 1:
+            df = pd.DataFrame(app_state.data_log)
+            df["seconds"] = range(len(df))
+            df = df.set_index("seconds")
+
+            trend_row1 = st.columns(2)
+            with trend_row1[0]:
+                st.caption("❤️ Heart Rate (BPM)")
+                st.line_chart(df[["bpm"]], height=160, use_container_width=True, color="#EC4899")
+            with trend_row1[1]:
+                st.caption("💚 HRV (ms)")
+                st.line_chart(df[["hrv"]], height=160, use_container_width=True, color="#10B981")
+
+            trend_row2 = st.columns(2)
+            with trend_row2[0]:
+                st.caption("🫁 Respiration (breaths/min)")
+                st.line_chart(df[["rr"]], height=160, use_container_width=True, color="#06B6D4")
+            with trend_row2[1]:
+                st.caption("🧠 Stress Index")
+                st.line_chart(df[["stress"]], height=160, use_container_width=True, color="#F59E0B")
+        else:
+            st.caption("Trend charts will appear here once a few seconds of data have been recorded.")
+
+        st.markdown("---")
+        if len(app_state.data_log) > 15:
             pdf_buffer = generate_pdf_report()
             st.download_button(
                 label="📄 Download Medical Report (PDF)",
@@ -575,11 +620,130 @@ with col2:
                 use_container_width=True
             )
         elif playing:
-            st.warning(f"⏳ Collecting data... {len(app_state.data_log)}/30 seconds")
+            st.warning(f"⏳ Collecting data... {len(app_state.data_log)}/15 seconds")
         else:
-            st.warning("Recording was too short to generate a full report (needs at least 30 seconds of data).")
+            st.warning("Recording was too short to generate a full report (needs at least 15 seconds of data).")
 
     render_dashboard(ctx.state.playing)
+
+# -----------------------------------------------------------------------------
+# HOW IT WORKS — AI/ML PIPELINE EXPLAINER
+# -----------------------------------------------------------------------------
+st.markdown("---")
+st.subheader("🧬 How Nabz Pro Works — The AI/ML Pipeline")
+st.markdown(
+    "Every vital sign shown above is derived from the same webcam video feed "
+    "using a chain of computer-vision and digital-signal-processing techniques — "
+    "no physical sensor required."
+)
+
+st.markdown("""
+<div class="pipeline-flow">
+    <div class="pipeline-step" style="background: linear-gradient(135deg, #EC4899, #DB2777);">
+        <div class="step-icon">📷</div>
+        <div class="step-title">Camera Frame</div>
+        <div class="step-desc">Raw webcam frame captured via WebRTC, 30 fps</div>
+    </div>
+    <div class="pipeline-arrow">→</div>
+    <div class="pipeline-step" style="background: linear-gradient(135deg, #8B5CF6, #6D28D9);">
+        <div class="step-icon">🧠</div>
+        <div class="step-title">Face Detection</div>
+        <div class="step-desc">Haar Cascade classifier (OpenCV computer vision)</div>
+    </div>
+    <div class="pipeline-arrow">→</div>
+    <div class="pipeline-step" style="background: linear-gradient(135deg, #3B82F6, #1D4ED8);">
+        <div class="step-icon">🎯</div>
+        <div class="step-title">ROI Extraction</div>
+        <div class="step-desc">Forehead region isolated from face bounding box</div>
+    </div>
+    <div class="pipeline-arrow">→</div>
+    <div class="pipeline-step" style="background: linear-gradient(135deg, #06B6D4, #0891B2);">
+        <div class="step-icon">🟢</div>
+        <div class="step-title">Green Channel Signal</div>
+        <div class="step-desc">Photoplethysmography (PPG): hemoglobin absorbs green light with each heartbeat</div>
+    </div>
+    <div class="pipeline-arrow">→</div>
+    <div class="pipeline-step" style="background: linear-gradient(135deg, #10B981, #059669);">
+        <div class="step-icon">🌊</div>
+        <div class="step-title">Bandpass Filter</div>
+        <div class="step-desc">3rd-order Butterworth filter isolates cardiac/respiratory bands</div>
+    </div>
+    <div class="pipeline-arrow">→</div>
+    <div class="pipeline-step" style="background: linear-gradient(135deg, #F59E0B, #D97706);">
+        <div class="step-icon">📊</div>
+        <div class="step-title">Spectral Analysis</div>
+        <div class="step-desc">Welch's method (FFT-based power spectral density)</div>
+    </div>
+    <div class="pipeline-arrow">→</div>
+    <div class="pipeline-step" style="background: linear-gradient(135deg, #EF4444, #DC2626);">
+        <div class="step-icon">💓</div>
+        <div class="step-title">Peak Detection</div>
+        <div class="step-desc">SciPy find_peaks locates individual heartbeats in the waveform</div>
+    </div>
+    <div class="pipeline-arrow">→</div>
+    <div class="pipeline-step" style="background: linear-gradient(135deg, #EC4899, #BE185D);">
+        <div class="step-icon">📈</div>
+        <div class="step-title">4 Vital Signs</div>
+        <div class="step-desc">BPM, HRV, Respiration & Stress Index computed</div>
+    </div>
+</div>
+""", unsafe_allow_html=True)
+
+st.markdown("#### 🔬 Which techniques compute which parameter")
+
+pc1, pc2 = st.columns(2)
+with pc1:
+    st.markdown("""
+    <div class="param-card" style="background: linear-gradient(135deg, #1e293b, #0f172a); border-left: 5px solid #EC4899;">
+        <div class="param-title">💓 Heart Rate (BPM)</div>
+        <div class="param-tech">
+        <b>1.</b> Green-channel PPG signal from forehead ROI<br>
+        <b>2.</b> Butterworth bandpass filter, 0.75–3.0 Hz (45–180 BPM range)<br>
+        <b>3.</b> Welch's Power Spectral Density (FFT-based)<br>
+        <b>4.</b> Dominant frequency peak → converted to beats/minute
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+with pc2:
+    st.markdown("""
+    <div class="param-card" style="background: linear-gradient(135deg, #1e293b, #0f172a); border-left: 5px solid #10B981;">
+        <div class="param-title">💚 Heart Rate Variability</div>
+        <div class="param-tech">
+        <b>1.</b> Same filtered cardiac signal as BPM<br>
+        <b>2.</b> SciPy find_peaks isolates individual heartbeat peaks<br>
+        <b>3.</b> Peak-to-peak (RR) intervals computed in the time domain<br>
+        <b>4.</b> RMSSD statistic (root mean square of successive differences)
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+pc3, pc4 = st.columns(2)
+with pc3:
+    st.markdown("""
+    <div class="param-card" style="background: linear-gradient(135deg, #1e293b, #0f172a); border-left: 5px solid #06B6D4;">
+        <div class="param-title">🫁 Respiratory Rate</div>
+        <div class="param-tech">
+        <b>1.</b> Same raw green-channel signal, different frequency band<br>
+        <b>2.</b> Bandpass filter, 0.15–0.5 Hz (9–30 breaths/min range)<br>
+        <b>3.</b> Welch's PSD applied to the low-frequency baseline wander<br>
+        <b>4.</b> Dominant peak → converted to breaths/minute
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+with pc4:
+    st.markdown("""
+    <div class="param-card" style="background: linear-gradient(135deg, #1e293b, #0f172a); border-left: 5px solid #F59E0B;">
+        <div class="param-title">🧠 Stress Index</div>
+        <div class="param-tech">
+        <b>1.</b> Derived from the RMSSD (HRV) value above<br>
+        <b>2.</b> Normalized to a 0–1 scale (autonomic nervous system proxy)<br>
+        <b>3.</b> Lower HRV → higher inferred sympathetic activity<br>
+        <b>4.</b> Inverted & scaled to a 0–100 Stress Index
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
 
 st.markdown("""
 <div style="text-align: center; padding: 20px; color: #64748b; border-top: 1px solid #1e293b; margin-top: 30px;">
