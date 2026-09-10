@@ -95,7 +95,7 @@ class rPPGProcessor(VideoProcessorBase):
         self.last_faces = []  # cache last detection result between throttled runs
 
     def recv(self, frame):
-        img = frame.to_ndarray(format="bgr2rgb")
+        img = frame.to_ndarray(format="rgb24")
         h, w, _ = img.shape
 
         # Calculate FPS
