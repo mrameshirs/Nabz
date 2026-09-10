@@ -111,7 +111,7 @@ class rPPGProcessor(VideoProcessorBase):
         # unnecessary CPU load once other processing (signal math) is also
         # competing for CPU time. The face barely moves frame-to-frame, so
         # reusing the last detection in between is visually seamless.
-        if self.frame_count % 3 == 0 or not self.last_faces:
+        if self.frame_count % 3 == 0 or len(self.last_faces) == 0:
             gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
             self.last_faces = face_cascade.detectMultiScale(
                 gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30)
