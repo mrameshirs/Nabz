@@ -1,7 +1,6 @@
 streamlit
 streamlit-webrtc
 opencv-python-headless
-mediapipe
 scipy
 numpy
 matplotlib
